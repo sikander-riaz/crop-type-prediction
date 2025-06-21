@@ -4,6 +4,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from model.predict import predict_output,model,MODEL_VERSION
 from schema.user_input import UserInput
+from schema.prediction_response import PredictionResponse
+
 
 # FastAPI app
 app = FastAPI(title="Crop Prediction API", version="1.0.0")
@@ -27,7 +29,7 @@ def health_check():
 
 # Input model with aliases
 
-@app.post("/predict")
+@app.post("/predict",response_model=PredictionResponse)
 def predict_crop(data: UserInput):
     """
     Predict crop type based on input features

@@ -33,6 +33,10 @@ pip install -r requirements.txt
 ```bash
 uvicorn app:app --reload
 
+### Visiting the api
+```bash
+http://127.0.0.1:8000/docs
+
 
 
 # Project Structure

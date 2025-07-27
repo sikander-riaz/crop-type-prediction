@@ -1,23 +1,28 @@
-
-import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
-from model.predict import predict_output,model,MODEL_VERSION
+from fastapi.middleware.cors import CORSMiddleware
+from model.predict import predict_output, model, MODEL_VERSION
 from schema.user_input import UserInput
 from schema.prediction_response import PredictionResponse
+import pandas as pd
 
-
-# FastAPI app
+# ✅ First, create the app
 app = FastAPI(title="Crop Prediction API", version="1.0.0")
 
+# ✅ Then, add middleware to the already-created app
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  # React frontend
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Human readable
+# ✅ Human-readable check
 @app.get('/')
 def home():
-    return {'message':'Crop Prediction API'}
+    return {'message': 'Crop Prediction API'}
 
-
-# machine readable
+# ✅ Health check endpoint
 @app.get('/health')
 def health_check():
     return {
@@ -26,40 +31,25 @@ def health_check():
         'model_loaded': model is not None
     }
 
-
-# Input model with aliases
-
-@app.post("/predict",response_model=PredictionResponse)
+# ✅ Crop prediction POST endpoint
+@app.post("/predict", response_model=PredictionResponse)
 def predict_crop(data: UserInput):
     """
     Predict crop type based on input features
     """
-
-    user_input={
-        'N':data.N,
-        
-        'P':data.P,
-        
-        'K': data.K,  
+    user_input = {
+        'N': data.N,
+        'P': data.P,
+        'K': data.K,
         'temperature': data.temperature,
-        'humidity':data.humidity,
-        
-        'ph':data.ph,
-        
-        'rainfall':data.rainfall,
-        
+        'humidity': data.humidity,
+        'ph': data.ph,
+        'rainfall': data.rainfall,
     }
-    
+
     try:
-        # Use internal (trained) field names, not aliases
-        # input_data = data.dict(by_alias=False)
-        # input_df = pd.DataFrame([input_data])
-        
-
-
         prediction = predict_output(user_input)
-        return JSONResponse(status_code=200, content={"predicted_category": prediction})
-
+        return JSONResponse(status_code=200, content=prediction)
     except Exception as e:
-        
         raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
+g

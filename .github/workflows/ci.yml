@@ -23,6 +23,8 @@ jobs:
           pip install pytest httpx
 
       - name: Test FastAPI backend
+        env:
+          PYTHONPATH: .
         run: |
           python -c "from app import app; print('FastAPI app imports successfully')"
           pytest tests/ -v

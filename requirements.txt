@@ -54,3 +54,4 @@ watchdog==6.0.0
 wheel==0.45.1
 pytest
 requests
+httpx

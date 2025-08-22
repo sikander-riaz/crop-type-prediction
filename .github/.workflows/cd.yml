@@ -98,7 +98,6 @@ jobs:
             #!/bin/bash
             cd ~/crop-predictor-app
             source venv/bin/activate
-            export DATABASE_URL="${{ secrets.DB_URL }}"
             export MODEL_PATH="~/crop-predictor-app/model"
             nohup uvicorn app:app --host 0.0.0.0 --port 8000 > backend.log 2>&1 &
             echo $! > backend.pid
@@ -195,63 +194,3 @@ jobs:
                     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                     proxy_set_header X-Forwarded-Proto $scheme;
                 }
-                
-                # Direct API access (for development/testing)
-                location /docs {
-                    proxy_pass http://localhost:8000/docs;
-                    proxy_set_header Host $host;
-                    proxy_set_header X-Real-IP $remote_addr;
-                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                }
-            }
-            EOF
-
-            # Enable the site
-            sudo ln -sf /etc/nginx/sites-available/crop-predictor /etc/nginx/sites-enabled/
-            sudo rm -f /etc/nginx/sites-enabled/default
-
-            # Test and reload nginx
-            sudo nginx -t && sudo systemctl reload nginx
-
-      - name: Health Check and Status
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            cd ~/crop-predictor-app
-
-            echo "=== Deployment Status ==="
-
-            # Check if processes are running
-            if pgrep -f "uvicorn app:app" > /dev/null; then
-                echo "✅ Backend is running"
-            else
-                echo "❌ Backend is not running"
-                echo "Backend logs:"
-                tail -n 20 backend.log || echo "No backend logs found"
-            fi
-
-            if pgrep -f "streamlit run frontend.py" > /dev/null; then
-                echo "✅ Frontend is running"
-            else
-                echo "❌ Frontend is not running"
-                echo "Frontend logs:"
-                tail -n 20 frontend.log || echo "No frontend logs found"
-            fi
-
-            # Test API endpoints
-            echo -e "\n=== API Health Check ==="
-            curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health && echo " - Backend health check passed" || echo " - Backend health check failed"
-            curl -s -o /dev/null -w "%{http_code}" http://localhost:8501 && echo " - Frontend check passed" || echo " - Frontend check failed"
-
-            echo -e "\n=== Access Information ==="
-            echo "🌐 Frontend: http://${{ secrets.EC2_HOST }}:8501 or http://${{ secrets.EC2_HOST }} (with nginx)"
-            echo "🔧 API: http://${{ secrets.EC2_HOST }}:8000"
-            echo "📚 API Docs: http://${{ secrets.EC2_HOST }}:8000/docs"
-
-            echo -e "\n=== Service Management ==="
-            echo "To stop services: ~/crop-predictor-app/stop_services.sh"
-            echo "To start backend: ~/crop-predictor-app/start_backend.sh"  
-            echo "To start frontend: ~/crop-predictor-app/start_frontend.sh"

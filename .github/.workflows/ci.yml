@@ -1,3 +1,18 @@
+# GitHub Workflows Setup
+
+You need to create these two files in your repository:
+
+## 1. Create the workflows directory:
+
+```bash
+mkdir -p .github/workflows
+```
+
+## 2. Create CI Pipeline File:
+
+**File: `.github/workflows/ci.yml`**
+
+```yaml
 name: CI Pipeline - Crop Predictor
 
 on:
@@ -11,53 +26,54 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
+      
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
-
+          python-version: '3.9'
+      
       - name: Install backend dependencies
         run: |
           pip install -r requirements.txt
-
+          pip install pytest  # Ensure pytest is installed
+      
       - name: Test FastAPI backend
         run: |
-          cd backend
+          # Test if FastAPI app can be imported
+          python -c "from app import app; print('FastAPI app imports successfully')"
+          # Run your existing tests
           pytest tests/ -v
-          # Run FastAPI server tests
-          python -m pytest test_app.py -v
-
+  
   test-frontend:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
+      
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
-
+          python-version: '3.9'
+      
       - name: Install frontend dependencies
         run: |
           pip install -r requirements.txt
-
+      
       - name: Test Streamlit app
         run: |
-          cd frontend
+          pip install -r requirements.txt
           python -c "import streamlit; print('Streamlit imports successfully')"
-          # Add any frontend tests here
-
+          python -c "exec(open('frontend.py').read().split('if __name__')[0]); print('Frontend script is valid')"
+  
   build-and-package:
     needs: [test-backend, test-frontend]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
+      
       - name: Create deployment package
         run: |
           mkdir -p deployment
-
+          
           # Copy all files to deployment directory
           cp *.py deployment/ || true
           cp requirements.txt deployment/ || true
@@ -67,36 +83,36 @@ jobs:
           cp -r public/ deployment/ || true
           cp Dockerfile deployment/ || true
           cp .dockerignore deployment/ || true
-
+          
           # Copy package.json files if needed for any Node.js dependencies
           cp package*.json deployment/ || true
-
+          
           # Create startup scripts
           cat > deployment/start_backend.sh << 'EOF'
           #!/bin/bash
           pip install -r requirements.txt
           uvicorn app:app --host 0.0.0.0 --port 8000 --reload &
           EOF
-
+          
           cat > deployment/start_frontend.sh << 'EOF'
           #!/bin/bash
           pip install -r requirements.txt
           streamlit run frontend.py --server.port 8501 --server.address 0.0.0.0 &
           EOF
-
+          
           chmod +x deployment/start_*.sh
-
+      
       - name: Create artifact
         run: |
           zip -r crop-predictor-app.zip deployment/
-
+      
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: crop-predictor-artifact
           path: crop-predictor-app.zip
           retention-days: 30
-
+      
       - name: Upload to S3 (Optional)
         if: github.ref == 'refs/heads/main'
         uses: aws-actions/configure-aws-credentials@v4
@@ -104,8 +120,77 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
-
+      
       - name: Push to S3
         if: github.ref == 'refs/heads/main'
         run: |
           aws s3 cp crop-predictor-app.zip s3://${{ secrets.S3_BUCKET }}/artifacts/crop-predictor-${{ github.sha }}.zip
+```
+
+## 3. Create CD Pipeline File:
+
+**File: `.github/workflows/cd.yml`**
+
+```yaml
+name: CD Pipeline - Crop Predictor
+
+on:
+  workflow_run:
+    workflows: ["CI Pipeline - Crop Predictor"]
+    types:
+      - completed
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    
+    steps:
+      - name: Download artifact from workflow run
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let allArtifacts = await github.rest.actions.listWorkflowRunArtifacts({
+               owner: context.repo.owner,
+               repo: context.repo.repo,
+               run_id: context.payload.workflow_run.id,
+            });
+            let matchArtifact = allArtifacts.data.artifacts.filter((artifact) => {
+              return artifact.name == "crop-predictor-artifact"
+            })[0];
+            let download = await github.rest.actions.downloadArtifact({
+               owner: context.repo.owner,
+               repo: context.repo.repo,
+               artifact_id: matchArtifact.id,
+               archive_format: 'zip',
+            });
+            let fs = require('fs');
+            fs.writeFileSync(`${process.env.GITHUB_WORKSPACE}/crop-predictor-artifact.zip`, Buffer.from(download.data));
+
+      - name: Unzip and prepare deployment
+        run: |
+          unzip crop-predictor-artifact.zip
+          ls -la deployment/
+
+      - name: Stop existing applications on EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            # Stop existing processes
+            pkill -f "uvicorn app:app" || true
+            pkill -f "streamlit run frontend.py" || true
+            
+            # Wait for processes to stop
+            sleep 5
+            
+            # Create deployment directory
+            mkdir -p ~/crop-predictor-app
+            cd ~/crop-predictor-app
+            rm -rf *
+
+      - name: Copy application files to EC2
+        uses: app

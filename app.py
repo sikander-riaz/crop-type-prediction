@@ -52,4 +52,3 @@ def predict_crop(data: UserInput):
         return JSONResponse(status_code=200, content=prediction)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
-g

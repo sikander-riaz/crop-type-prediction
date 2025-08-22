@@ -83,13 +83,9 @@ jobs:
 
           chmod +x deployment/start_*.sh
 
-      - name: Create artifact
-        run: |
-          zip -r crop-predictor-app.zip deployment/
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: crop-predictor-artifact
-          path: crop-predictor-app.zip
+          path: deployment/
           retention-days: 4

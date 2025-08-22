@@ -1,0 +1,6 @@
+__pycache__/__init__.cpython-311.pyc
+__pycache__/app.cpython-311.pyc
+model/__pycache__/predict.cpython-311.pyc
+schema/__pycache__/prediction_response.cpython-311.pyc
+schema/__pycache__/user_input.cpython-311.pyc
+tests/__pycache__/test_app.cpython-311-pytest-8.4.1.pyc

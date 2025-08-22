@@ -92,4 +92,4 @@ jobs:
         with:
           name: crop-predictor-artifact
           path: crop-predictor-app.zip
-          retention-days: 3
+          retention-days: 4

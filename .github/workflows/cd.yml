@@ -37,6 +37,11 @@ jobs:
       - name: Unzip and prepare deployment
         run: |
           unzip crop-predictor-artifact.zip
+          # Create deployment directory and move files
+          mkdir -p deployment
+          # Move all extracted files to deployment directory (exclude the zip file itself)
+          find . -maxdepth 1 -type f ! -name "crop-predictor-artifact.zip" ! -name "*.yml" ! -name "*.yaml" -exec mv {} deployment/ \;
+          find . -maxdepth 1 -type d ! -name "." ! -name "deployment" ! -name ".git*" -exec mv {} deployment/ \;
           ls -la deployment/
 
       - name: Stop existing applications on EC2
@@ -91,7 +96,12 @@ jobs:
             pip install --upgrade pip
 
             # Install dependencies
-            pip install -r requirements.txt
+            if [ -f requirements.txt ]; then
+                pip install -r requirements.txt
+            else
+                echo "requirements.txt not found!"
+                exit 1
+            fi
 
             # Create startup scripts
             cat > start_backend.sh << 'EOF'
@@ -130,6 +140,23 @@ jobs:
             # Make scripts executable
             chmod +x start_backend.sh start_frontend.sh stop_services.sh
 
+      - name: Verify deployment structure
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd ~/crop-predictor-app
+            echo "Deployment structure:"
+            ls -la
+            echo "Checking required files:"
+            [ -f app.py ] && echo "✓ app.py found" || echo "✗ app.py missing"
+            [ -f frontend.py ] && echo "✓ frontend.py found" || echo "✗ frontend.py missing"
+            [ -f requirements.txt ] && echo "✓ requirements.txt found" || echo "✗ requirements.txt missing"
+            [ -d model ] && echo "✓ model directory found" || echo "✗ model directory missing"
+            [ -f model/predict.py ] && echo "✓ model/predict.py found" || echo "✗ model/predict.py missing"
+
       - name: Start applications
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -146,18 +173,52 @@ jobs:
             sleep 2
 
             # Start backend
+            echo "Starting backend..."
             ./start_backend.sh
 
             # Wait for backend to start
-            sleep 5
+            sleep 10
+
+            # Check if backend started successfully
+            if [ -f backend.pid ]; then
+                if kill -0 $(cat backend.pid) 2>/dev/null; then
+                    echo "✓ Backend started successfully"
+                else
+                    echo "✗ Backend failed to start"
+                    cat backend.log
+                    exit 1
+                fi
+            else
+                echo "✗ Backend PID file not created"
+                cat backend.log
+                exit 1
+            fi
 
             # Start frontend
+            echo "Starting frontend..."
             ./start_frontend.sh
 
             # Wait for services to start
-            sleep 5
+            sleep 10
 
-      - name: Setup Nginx reverse proxy (Optional)
+            # Check if frontend started successfully
+            if [ -f frontend.pid ]; then
+                if kill -0 $(cat frontend.pid) 2>/dev/null; then
+                    echo "✓ Frontend started successfully"
+                else
+                    echo "✗ Frontend failed to start"
+                    cat frontend.log
+                    exit 1
+                fi
+            else
+                echo "✗ Frontend PID file not created"
+                cat frontend.log
+                exit 1
+            fi
+
+            echo "Both services started successfully!"
+
+      - name: Setup Nginx reverse proxy
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -171,7 +232,7 @@ jobs:
             sudo tee /etc/nginx/sites-available/crop-predictor << 'EOF'
             server {
                 listen 80;
-                server_name ${{ secrets.EC2_HOST }};
+                server_name _;
                 
                 # Streamlit frontend
                 location / {
@@ -194,3 +255,63 @@ jobs:
                     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                     proxy_set_header X-Forwarded-Proto $scheme;
                 }
+            }
+            EOF
+
+            # Enable the site
+            sudo ln -sf /etc/nginx/sites-available/crop-predictor /etc/nginx/sites-enabled/
+
+            # Remove default site if it exists
+            sudo rm -f /etc/nginx/sites-enabled/default
+
+            # Test nginx configuration
+            sudo nginx -t
+
+            # Restart nginx
+            sudo systemctl restart nginx
+            sudo systemctl enable nginx
+
+      - name: Health check
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            echo "Performing health checks..."
+
+            # Check if processes are running
+            echo "Checking backend process..."
+            if pgrep -f "uvicorn app:app" > /dev/null; then
+                echo "✓ Backend process is running"
+            else
+                echo "✗ Backend process not found"
+            fi
+
+            echo "Checking frontend process..."
+            if pgrep -f "streamlit run frontend.py" > /dev/null; then
+                echo "✓ Frontend process is running"
+            else
+                echo "✗ Frontend process not found"
+            fi
+
+            # Check if ports are listening
+            echo "Checking port 8000 (backend)..."
+            if netstat -tlnp | grep :8000 > /dev/null; then
+                echo "✓ Backend port 8000 is listening"
+            else
+                echo "✗ Backend port 8000 not listening"
+            fi
+
+            echo "Checking port 8501 (frontend)..."
+            if netstat -tlnp | grep :8501 > /dev/null; then
+                echo "✓ Frontend port 8501 is listening"
+            else
+                echo "✗ Frontend port 8501 not listening"
+            fi
+
+            echo "Checking nginx status..."
+            sudo systemctl is-active nginx
+
+            echo "Deployment completed successfully!"
+            echo "Access your application at: http://${{ secrets.EC2_HOST }}"

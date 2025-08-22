@@ -1,0 +1,111 @@
+name: CI Pipeline - Crop Predictor
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.9"
+
+      - name: Install backend dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Test FastAPI backend
+        run: |
+          cd backend
+          pytest tests/ -v
+          # Run FastAPI server tests
+          python -m pytest test_app.py -v
+
+  test-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.9"
+
+      - name: Install frontend dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Test Streamlit app
+        run: |
+          cd frontend
+          python -c "import streamlit; print('Streamlit imports successfully')"
+          # Add any frontend tests here
+
+  build-and-package:
+    needs: [test-backend, test-frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create deployment package
+        run: |
+          mkdir -p deployment
+
+          # Copy all files to deployment directory
+          cp *.py deployment/ || true
+          cp requirements.txt deployment/ || true
+          cp -r model/ deployment/ || true
+          cp -r src/ deployment/ || true
+          cp -r schema/ deployment/ || true
+          cp -r public/ deployment/ || true
+          cp Dockerfile deployment/ || true
+          cp .dockerignore deployment/ || true
+
+          # Copy package.json files if needed for any Node.js dependencies
+          cp package*.json deployment/ || true
+
+          # Create startup scripts
+          cat > deployment/start_backend.sh << 'EOF'
+          #!/bin/bash
+          pip install -r requirements.txt
+          uvicorn app:app --host 0.0.0.0 --port 8000 --reload &
+          EOF
+
+          cat > deployment/start_frontend.sh << 'EOF'
+          #!/bin/bash
+          pip install -r requirements.txt
+          streamlit run frontend.py --server.port 8501 --server.address 0.0.0.0 &
+          EOF
+
+          chmod +x deployment/start_*.sh
+
+      - name: Create artifact
+        run: |
+          zip -r crop-predictor-app.zip deployment/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: crop-predictor-artifact
+          path: crop-predictor-app.zip
+          retention-days: 30
+
+      - name: Upload to S3 (Optional)
+        if: github.ref == 'refs/heads/main'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Push to S3
+        if: github.ref == 'refs/heads/main'
+        run: |
+          aws s3 cp crop-predictor-app.zip s3://${{ secrets.S3_BUCKET }}/artifacts/crop-predictor-${{ github.sha }}.zip

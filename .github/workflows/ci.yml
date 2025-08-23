@@ -12,24 +12,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v4
         with:
           python-version: "3.11"
-      - run: |
+
+      - name: Install dependencies
+        run: |
           pip install -r requirements.txt
           pip install pytest httpx
-      - run: pytest tests/ -v
+
+      - name: Run backend tests
+        run: |
+          PYTHONPATH=${{ github.workspace }} pytest tests/ -v
 
   # ✅ Frontend tests
   test-frontend:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v4
         with:
           python-version: "3.11"
-      - run: pip install -r requirements.txt
-      - run: |
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run frontend tests
+        run: |
           python -c "import streamlit; print('Streamlit ok')"
           python -c "exec(open('frontend.py').read().split('if __name__')[0])"
 

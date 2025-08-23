@@ -2,7 +2,7 @@ name: CD Pipeline - Crop Predictor
 
 on:
   workflow_run:
-    workflows: ["CI Pipeline - Crop Predictor"] # ✅ must exactly match CI name
+    workflows: ["CI Pipeline - Crop Predictor"] # ✅ CI workflow name
     types:
       - completed
 
@@ -15,7 +15,7 @@ jobs:
       - name: Download artifact from CI
         uses: actions/download-artifact@v4
         with:
-          name: crop-app-predictor # ✅ artifact name from CI
+          name: crop-predictor-package # ✅ match CI artifact name
           path: ./artifact
           repository: ${{ github.repository }}
           run-id: ${{ github.event.workflow_run.id }}
@@ -24,7 +24,7 @@ jobs:
         run: ls -R ./artifact
 
       - name: Zip artifact
-        run: zip -r crop-app-predictor.zip ./artifact
+        run: zip -r crop-predictor-package.zip ./artifact
 
       - name: Upload artifact to EC2
         uses: appleboy/scp-action@v0.1.5
@@ -32,7 +32,7 @@ jobs:
           host: ${{ secrets.HOST }}
           username: ${{ secrets.USERNAME }}
           key: ${{ secrets.KEY }}
-          source: "crop-app-predictor.zip"
+          source: "crop-predictor-package.zip"
           target: "/home/${{ secrets.USERNAME }}/"
 
       - name: Deploy & Start Backend + Frontend
@@ -49,7 +49,7 @@ jobs:
             rm -rf ${{ secrets.APP_DIR }}/*
 
             echo "📥 Unzipping artifact..."
-            unzip -o /home/${{ secrets.USERNAME }}/crop-app-predictor.zip -d ${{ secrets.APP_DIR }}
+            unzip -o /home/${{ secrets.USERNAME }}/crop-predictor-package.zip -d ${{ secrets.APP_DIR }}
             cd ${{ secrets.APP_DIR }}
 
             echo "🐍 Setting up Python venv..."

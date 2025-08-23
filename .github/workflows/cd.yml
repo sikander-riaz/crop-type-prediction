@@ -5,6 +5,7 @@ on:
     workflows: ["CI Pipeline"]
     types:
       - completed
+    branches: [main]
 
 jobs:
   deploy:
@@ -16,9 +17,237 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: crop-predictor-artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
 
-      - name: Unzip artifact
-        run: unzip crop-predictor-app.zip
+      - name: Prepare deployment files
+        run: |
+          # List what we downloaded
+          echo "Downloaded files:"
+          ls -la
+
+          # The artifact should contain a zip file
+          if [ -f crop-predictor-app.zip ]; then
+            echo "Found crop-predictor-app.zip, extracting..."
+            unzip crop-predictor-app.zip
+          else
+            echo "Looking for other zip files..."
+            find . -name "*.zip" -exec echo "Found: {}" \;
+            # Extract the first zip file found
+            ZIPFILE=$(find . -name "*.zip" | head -1)
+            if [ -n "$ZIPFILE" ]; then
+              echo "Extracting $ZIPFILE"
+              unzip "$ZIPFILE"
+            else
+              echo "No zip file found, assuming files are already extracted"
+            fi
+          fi
+
+          # Create deployment directory and organize files
+          mkdir -p deployment
+
+          # Move application files to deployment directory
+          # Exclude CI/CD specific files and directories
+          for item in *; do
+            if [ "$item" != "deployment" ] && [ "$item" != "*.zip" ] && [ "$item" != ".git*" ]; then
+              if [ -f "$item" ] || [ -d "$item" ]; then
+                mv "$item" deployment/ 2>/dev/null || true
+              fi
+            fi
+          done
+
+          echo "Deployment directory contents:"
+          ls -la deployment/
+
+      - name: Create deployment script
+        run: |
+          cat > deployment/deploy.sh << 'EOF'
+          #!/bin/bash
+          set -e
+
+          APP_DIR="/home/ubuntu/app"
+
+          echo "=== Crop Predictor Deployment Script ==="
+          echo "Starting deployment at $(date)"
+
+          # Navigate to app directory
+          cd $APP_DIR
+
+          # Stop existing services
+          echo "Stopping existing services..."
+          pkill -f "uvicorn app:app" || true
+          pkill -f "streamlit run frontend.py" || true
+          sleep 5
+
+          # Update system and install dependencies
+          echo "Updating system packages..."
+          sudo apt update -y
+          sudo apt install -y python3 python3-pip python3-venv
+
+          # Create virtual environment if it doesn't exist
+          if [ ! -d "venv" ]; then
+            echo "Creating virtual environment..."
+            python3 -m venv venv
+          fi
+
+          # Activate virtual environment and install requirements
+          echo "Installing Python dependencies..."
+          source venv/bin/activate
+          pip install --upgrade pip
+
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            echo "ERROR: requirements.txt not found!"
+            exit 1
+          fi
+
+          # Verify required files exist
+          echo "Verifying deployment files..."
+          [ -f app.py ] || { echo "ERROR: app.py not found!"; exit 1; }
+          [ -f frontend.py ] || { echo "ERROR: frontend.py not found!"; exit 1; }
+          [ -d model ] || { echo "ERROR: model directory not found!"; exit 1; }
+
+          # Create or update startup scripts
+          echo "Creating startup scripts..."
+
+          cat > start_backend.sh << 'BACKEND_EOF'
+          #!/bin/bash
+          cd /home/ubuntu/app
+          source venv/bin/activate
+          export MODEL_PATH="/home/ubuntu/app/model"
+          echo "Starting FastAPI backend on port 8000..."
+          nohup uvicorn app:app --host 0.0.0.0 --port 8000 --reload > backend.log 2>&1 &
+          echo $! > backend.pid
+          echo "Backend started with PID: $(cat backend.pid)"
+          BACKEND_EOF
+
+          cat > start_frontend.sh << 'FRONTEND_EOF'
+          #!/bin/bash
+          cd /home/ubuntu/app
+          source venv/bin/activate
+          export FASTAPI_URL="http://localhost:8000"
+          echo "Starting Streamlit frontend on port 8501..."
+          nohup streamlit run frontend.py --server.port 8501 --server.address 0.0.0.0 --server.headless true --server.runOnSave false > frontend.log 2>&1 &
+          echo $! > frontend.pid
+          echo "Frontend started with PID: $(cat frontend.pid)"
+          FRONTEND_EOF
+
+          cat > stop_services.sh << 'STOP_EOF'
+          #!/bin/bash
+          cd /home/ubuntu/app
+          echo "Stopping services..."
+          if [ -f backend.pid ]; then
+              PID=$(cat backend.pid)
+              if kill -0 $PID 2>/dev/null; then
+                  kill $PID && echo "Backend stopped"
+              fi
+              rm -f backend.pid
+          fi
+          if [ -f frontend.pid ]; then
+              PID=$(cat frontend.pid)
+              if kill -0 $PID 2>/dev/null; then
+                  kill $PID && echo "Frontend stopped"
+              fi
+              rm -f frontend.pid
+          fi
+          pkill -f "uvicorn app:app" || true
+          pkill -f "streamlit run frontend.py" || true
+          echo "All services stopped"
+          STOP_EOF
+
+          # Make scripts executable
+          chmod +x start_backend.sh start_frontend.sh stop_services.sh
+
+          # Start services
+          echo "Starting backend..."
+          ./start_backend.sh
+          sleep 8
+
+          # Verify backend started
+          if [ -f backend.pid ] && kill -0 $(cat backend.pid) 2>/dev/null; then
+              echo "✓ Backend started successfully"
+          else
+              echo "✗ Backend failed to start"
+              tail -10 backend.log 2>/dev/null || echo "No backend log found"
+              exit 1
+          fi
+
+          echo "Starting frontend..."
+          ./start_frontend.sh
+          sleep 10
+
+          # Verify frontend started
+          if [ -f frontend.pid ] && kill -0 $(cat frontend.pid) 2>/dev/null; then
+              echo "✓ Frontend started successfully"
+          else
+              echo "✗ Frontend failed to start"
+              tail -10 frontend.log 2>/dev/null || echo "No frontend log found"
+              # Don't exit here, backend might still work
+          fi
+
+          # Setup nginx if not already configured
+          if [ ! -f /etc/nginx/sites-available/crop-predictor ]; then
+              echo "Setting up Nginx..."
+              sudo apt install -y nginx
+              
+              sudo tee /etc/nginx/sites-available/crop-predictor > /dev/null << 'NGINX_EOF'
+          server {
+              listen 80;
+              server_name _;
+              
+              client_max_body_size 100M;
+              
+              location / {
+                  proxy_pass http://localhost:8501;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "upgrade";
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                  proxy_read_timeout 86400;
+              }
+              
+              location /api/ {
+                  proxy_pass http://localhost:8000/;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+              
+              location /health {
+                  access_log off;
+                  return 200 "healthy\n";
+                  add_header Content-Type text/plain;
+              }
+          }
+          NGINX_EOF
+              
+              sudo ln -sf /etc/nginx/sites-available/crop-predictor /etc/nginx/sites-enabled/
+              sudo rm -f /etc/nginx/sites-enabled/default
+              sudo nginx -t && sudo systemctl restart nginx
+              sudo systemctl enable nginx
+          else
+              echo "Nginx already configured, restarting..."
+              sudo systemctl restart nginx
+          fi
+
+          # Final health check
+          echo "=== Deployment Health Check ==="
+          ps aux | grep -E "(uvicorn|streamlit)" | grep -v grep || echo "No processes found"
+          netstat -tlnp | grep -E "(8000|8501|:80)" || echo "No ports listening"
+
+          echo "=== Deployment Complete ==="
+          echo "✅ Deployment finished at $(date)"
+          echo "🌐 Application should be available at: http://$(curl -s ifconfig.me 2>/dev/null || echo 'YOUR_EC2_IP')"
+          echo "📊 Direct Frontend: http://$(curl -s ifconfig.me 2>/dev/null || echo 'YOUR_EC2_IP'):8501"
+          echo "🔧 Direct Backend: http://$(curl -s ifconfig.me 2>/dev/null || echo 'YOUR_EC2_IP'):8000"
+          EOF
+
+          chmod +x deployment/deploy.sh
 
       - name: Setup SSH
         run: |
@@ -27,7 +256,45 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
 
+      - name: Create app directory on EC2
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'mkdir -p /home/ubuntu/app'
+
       - name: Deploy to EC2
         run: |
+          echo "Copying files to EC2..."
           scp -r deployment/* ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/home/ubuntu/app/
-          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash /home/ubuntu/app/deploy.sh'
+
+          echo "Running deployment script..."
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'chmod +x /home/ubuntu/app/deploy.sh && bash /home/ubuntu/app/deploy.sh'
+
+      - name: Verify deployment
+        run: |
+          echo "Verifying deployment..."
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} '
+            cd /home/ubuntu/app
+            echo "=== Final Status Check ==="
+            if pgrep -f "uvicorn app:app" > /dev/null; then
+                echo "✓ Backend is running"
+            else
+                echo "✗ Backend not running"
+            fi
+            
+            if pgrep -f "streamlit run frontend.py" > /dev/null; then
+                echo "✓ Frontend is running"
+            else
+                echo "✗ Frontend not running"
+            fi
+            
+            if sudo systemctl is-active --quiet nginx; then
+                echo "✓ Nginx is running"
+            else
+                echo "✗ Nginx not running"
+            fi
+            
+            echo "=== Application URLs ==="
+            PUBLIC_IP=$(curl -s ifconfig.me 2>/dev/null || echo "YOUR_EC2_IP")
+            echo "🌐 Main Application: http://$PUBLIC_IP"
+            echo "📊 Streamlit Direct: http://$PUBLIC_IP:8501"
+            echo "🔧 FastAPI Direct: http://$PUBLIC_IP:8000"
+          '

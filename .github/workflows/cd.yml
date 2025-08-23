@@ -19,13 +19,21 @@ jobs:
     runs-on: ubuntu-latest
     # This condition ensures deployment only runs if the CI workflow was successful
     if: github.event.workflow_run.conclusion == 'success'
+
+    # Grant permissions for the job to read artifacts from the triggering workflow
+    permissions:
+      actions: read
+      contents: read
+
     steps:
+      # The download-artifact action, when used in a workflow_run context,
+      # will automatically download from the triggering workflow.
       - name: Download deployment artifact
         uses: actions/download-artifact@v4
         with:
           name: crop-predictor-artifact
-          # The run_id of the workflow that triggered this run
-          run-id: ${{ github.event.workflow_run.id }}
+          # The 'run-id' parameter is not valid for this action and has been removed.
+          # The action automatically fetches the artifact from the triggering workflow run.
 
       - name: Deploy to EC2
         uses: appleboy/ssh-action@master
@@ -36,8 +44,12 @@ jobs:
           script: |
             # Create a directory for the app if it doesn't exist
             mkdir -p ~/crop-predictor-app
+            # List the downloaded files for debugging purposes
+            echo "--- Downloaded Artifact Contents ---"
+            ls -R
+            echo "------------------------------------"
             # Copy the contents of the artifact to the app directory on the server
-            scp -r * ~/crop-predictor-app/
+            scp -o StrictHostKeyChecking=no -r * ~/crop-predictor-app/
             # Navigate into the app directory and execute the startup scripts
             cd ~/crop-predictor-app
             ./start_backend.sh

@@ -5,7 +5,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Deploy and start app
+      - name: Deploy and start the app
         run: |
           mkdir -p ~/crop-predictor-app
           cp -r * ~/crop-predictor-app/

@@ -2,78 +2,7 @@ name: CD Pipeline - Crop Predictor
 
 on:
   workflow_run:
-    workflows: ["CI Pipeline - Crop Predictor"] # must match your CI workflow name
-    types:
-      - completed
-
-jobs:
-  deploy:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
-    runs-on: self-hosted
-
-    steps:
-      - name: Download artifact from CI
-        uses: actions/download-artifact@v4
-        with:
-          name: crop-predictor-package
-          path: ./artifact
-          repository: ${{ github.repository }}
-          run-id: ${{ github.event.workflow_run.id }}
-
-      - name: List artifact contents
-        run: ls -R ./artifact
-
-      - name: Zip artifact
-        run: zip -r crop-predictor-artifact.zip ./artifact
-
-      - name: Upload artifact to EC2
-        uses: appleboy/scp-action@v0.1.5
-        with:
-          host: ${{ secrets.HOST }}
-          username: ec2-user
-          key: ${{ secrets.KEY }}
-          source: "crop-predictor-artifact.zip"
-          target: "/home/ec2-user/"
-
-      - name: Deploy & Start Backend + Frontend
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.HOST }}
-          username: ec2-user
-          key: ${{ secrets.KEY }}
-          script: |
-            set -e
-
-            echo "📦 Preparing deployment directory..."
-            mkdir -p ${{ secrets.APP_DIR }}
-            rm -rf ${{ secrets.APP_DIR }}/*
-
-            echo "📥 Unzipping artifact..."
-            unzip -o /home/ec2-user/crop-predictor-artifact.zip -d ${{ secrets.APP_DIR }}
-            cd ${{ secrets.APP_DIR }}
-
-            echo "🐍 Setting up Python venv..."
-            python3 -m venv venv
-            source venv/bin/activate
-            pip install --upgrade pip
-            pip install -r requirements.txt
-
-            echo "🛑 Stopping any running processes..."
-            lsof -ti:8000 | xargs kill -9 2>/dev/null || true
-            lsof -ti:8501 | xargs kill -9 2>/dev/null || true
-
-            echo "🚀 Starting backend..."
-            nohup venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000 > backend.log 2>&1 &
-
-            echo "🎨 Starting frontend..."
-            nohup venv/bin/streamlit run frontend.py --server.port 8501 --server.address 0.0.0.0 > frontend.log 2>&1 &
-
-            echo "✅ Deployment complete! Backend on :8000, Frontend on :8501"
-name: CD Pipeline - Crop Predictor
-
-on:
-  workflow_run:
-    workflows: ["CI Pipeline - Crop Predictor"] # must match your CI workflow name
+    workflows: ["CI Pipeline - Crop Predictor"] # ✅ must exactly match CI name
     types:
       - completed
 
@@ -86,7 +15,7 @@ jobs:
       - name: Download artifact from CI
         uses: actions/download-artifact@v4
         with:
-          name: crop-predictor-package
+          name: crop-app-predictor # ✅ artifact name from CI
           path: ./artifact
           repository: ${{ github.repository }}
           run-id: ${{ github.event.workflow_run.id }}
@@ -95,22 +24,22 @@ jobs:
         run: ls -R ./artifact
 
       - name: Zip artifact
-        run: zip -r crop-predictor-artifact.zip ./artifact
+        run: zip -r crop-app-predictor.zip ./artifact
 
       - name: Upload artifact to EC2
         uses: appleboy/scp-action@v0.1.5
         with:
           host: ${{ secrets.HOST }}
-          username: ec2-user
+          username: ${{ secrets.USERNAME }}
           key: ${{ secrets.KEY }}
-          source: "crop-predictor-artifact.zip"
-          target: "/home/ec2-user/"
+          source: "crop-app-predictor.zip"
+          target: "/home/${{ secrets.USERNAME }}/"
 
       - name: Deploy & Start Backend + Frontend
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.HOST }}
-          username: ec2-user
+          username: ${{ secrets.USERNAME }}
           key: ${{ secrets.KEY }}
           script: |
             set -e
@@ -120,7 +49,7 @@ jobs:
             rm -rf ${{ secrets.APP_DIR }}/*
 
             echo "📥 Unzipping artifact..."
-            unzip -o /home/ec2-user/crop-predictor-artifact.zip -d ${{ secrets.APP_DIR }}
+            unzip -o /home/${{ secrets.USERNAME }}/crop-app-predictor.zip -d ${{ secrets.APP_DIR }}
             cd ${{ secrets.APP_DIR }}
 
             echo "🐍 Setting up Python venv..."

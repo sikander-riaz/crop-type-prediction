@@ -1,300 +1,436 @@
-name: CD Pipeline
+name: CD Pipeline - Crop Predictor
 
 on:
   workflow_run:
-    workflows: ["CI Pipeline"]
+    workflows: ["CI Pipeline - Crop Predictor"]
     types:
       - completed
     branches: [main]
 
 jobs:
   deploy:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
     steps:
-      - name: Download artifact
-        uses: actions/download-artifact@v4
+      - name: Download artifact from workflow run
+        uses: actions/github-script@v7
         with:
-          name: crop-predictor-artifact
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ github.event.workflow_run.id }}
+          script: |
+            let allArtifacts = await github.rest.actions.listWorkflowRunArtifacts({
+               owner: context.repo.owner,
+               repo: context.repo.repo,
+               run_id: context.payload.workflow_run.id,
+            });
+            let matchArtifact = allArtifacts.data.artifacts.filter((artifact) => {
+              return artifact.name == "crop-predictor-artifact"
+            })[0];
+            let download = await github.rest.actions.downloadArtifact({
+               owner: context.repo.owner,
+               repo: context.repo.repo,
+               artifact_id: matchArtifact.id,
+               archive_format: 'zip',
+            });
+            let fs = require('fs');
+            fs.writeFileSync(`${process.env.GITHUB_WORKSPACE}/crop-predictor-artifact.zip`, Buffer.from(download.data));
 
-      - name: Prepare deployment files
+      - name: Unzip and prepare deployment
         run: |
-          # List what we downloaded
-          echo "Downloaded files:"
-          ls -la
-
-          # The artifact should contain a zip file
-          if [ -f crop-predictor-app.zip ]; then
-            echo "Found crop-predictor-app.zip, extracting..."
-            unzip crop-predictor-app.zip
-          else
-            echo "Looking for other zip files..."
-            find . -name "*.zip" -exec echo "Found: {}" \;
-            # Extract the first zip file found
-            ZIPFILE=$(find . -name "*.zip" | head -1)
-            if [ -n "$ZIPFILE" ]; then
-              echo "Extracting $ZIPFILE"
-              unzip "$ZIPFILE"
-            else
-              echo "No zip file found, assuming files are already extracted"
-            fi
-          fi
-
-          # Create deployment directory and organize files
+          unzip crop-predictor-artifact.zip
+          # Create deployment directory and move files
           mkdir -p deployment
-
-          # Move application files to deployment directory
-          # Exclude CI/CD specific files and directories
-          for item in *; do
-            if [ "$item" != "deployment" ] && [ "$item" != "*.zip" ] && [ "$item" != ".git*" ]; then
-              if [ -f "$item" ] || [ -d "$item" ]; then
-                mv "$item" deployment/ 2>/dev/null || true
-              fi
-            fi
-          done
-
-          echo "Deployment directory contents:"
+          # Move all extracted files to deployment directory (exclude the zip file itself)
+          find . -maxdepth 1 -type f ! -name "crop-predictor-artifact.zip" ! -name "*.yml" ! -name "*.yaml" -exec mv {} deployment/ \;
+          find . -maxdepth 1 -type d ! -name "." ! -name "deployment" ! -name ".git*" -exec mv {} deployment/ \;
           ls -la deployment/
 
-      - name: Create deployment script
-        run: |
-          cat > deployment/deploy.sh << 'EOF'
-          #!/bin/bash
-          set -e
+      - name: Quick process cleanup
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 15s
+          script: |
+            echo "Quick process cleanup..."
+            # Fast kill without waiting
+            pkill -9 -f "uvicorn app:app" 2>/dev/null || true
+            pkill -9 -f "streamlit run frontend.py" 2>/dev/null || true
+            echo "Processes killed"
 
-          APP_DIR="/home/ubuntu/app"
+      - name: Prepare deployment directory
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 20s
+          script: |
+            echo "Setting up deployment directory..."
+            mkdir -p ~/crop-predictor-app
+            cd ~/crop-predictor-app
+            rm -rf * || true
+            echo "Directory ready"
 
-          echo "=== Crop Predictor Deployment Script ==="
-          echo "Starting deployment at $(date)"
+      - name: Copy application files to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "./deployment/*"
+          target: "~/crop-predictor-app"
+          strip_components: 1
 
-          # Navigate to app directory
-          cd $APP_DIR
+      - name: Install system dependencies
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 180s
+          command_timeout: 120s
+          script: |
+            echo "Installing system dependencies..."
+            # Update package list
+            sudo apt update -y
 
-          # Stop existing services
-          echo "Stopping existing services..."
-          pkill -f "uvicorn app:app" || true
-          pkill -f "streamlit run frontend.py" || true
-          sleep 5
+            # Install required packages
+            sudo apt install -y python3 python3-pip python3-venv python3-dev curl nginx
 
-          # Update system and install dependencies
-          echo "Updating system packages..."
-          sudo apt update -y
-          sudo apt install -y python3 python3-pip python3-venv
+            echo "System dependencies installed"
 
-          # Create virtual environment if it doesn't exist
-          if [ ! -d "venv" ]; then
-            echo "Creating virtual environment..."
+      - name: Setup Python environment and install packages
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 300s
+          command_timeout: 240s
+          script: |
+            cd ~/crop-predictor-app
+
+            echo "Setting up Python environment..."
+
+            # Create virtual environment
             python3 -m venv venv
-          fi
+            source venv/bin/activate
 
-          # Activate virtual environment and install requirements
-          echo "Installing Python dependencies..."
-          source venv/bin/activate
-          pip install --upgrade pip
+            # Upgrade pip
+            pip install --upgrade pip
 
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            echo "ERROR: requirements.txt not found!"
-            exit 1
-          fi
+            # Install requirements
+            if [ -f requirements.txt ]; then
+                echo "Installing Python packages..."
+                pip install -r requirements.txt
+                echo "Packages installed successfully"
+            else
+                echo "ERROR: requirements.txt not found!"
+                ls -la
+                exit 1
+            fi
 
-          # Verify required files exist
-          echo "Verifying deployment files..."
-          [ -f app.py ] || { echo "ERROR: app.py not found!"; exit 1; }
-          [ -f frontend.py ] || { echo "ERROR: frontend.py not found!"; exit 1; }
-          [ -d model ] || { echo "ERROR: model directory not found!"; exit 1; }
+            # Quick verification
+            python3 -c "import uvicorn, streamlit, fastapi; print('Core packages verified')"
 
-          # Create or update startup scripts
-          echo "Creating startup scripts..."
+      - name: Create service scripts
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 60s
+          script: |
+            cd ~/crop-predictor-app
 
-          cat > start_backend.sh << 'BACKEND_EOF'
-          #!/bin/bash
-          cd /home/ubuntu/app
-          source venv/bin/activate
-          export MODEL_PATH="/home/ubuntu/app/model"
-          echo "Starting FastAPI backend on port 8000..."
-          nohup uvicorn app:app --host 0.0.0.0 --port 8000 --reload > backend.log 2>&1 &
-          echo $! > backend.pid
-          echo "Backend started with PID: $(cat backend.pid)"
-          BACKEND_EOF
+            echo "Creating service management scripts..."
 
-          cat > start_frontend.sh << 'FRONTEND_EOF'
-          #!/bin/bash
-          cd /home/ubuntu/app
-          source venv/bin/activate
-          export FASTAPI_URL="http://localhost:8000"
-          echo "Starting Streamlit frontend on port 8501..."
-          nohup streamlit run frontend.py --server.port 8501 --server.address 0.0.0.0 --server.headless true --server.runOnSave false > frontend.log 2>&1 &
-          echo $! > frontend.pid
-          echo "Frontend started with PID: $(cat frontend.pid)"
-          FRONTEND_EOF
+            # Backend start script
+            cat > start_backend.sh << 'EOF'
+            #!/bin/bash
+            cd ~/crop-predictor-app
+            source venv/bin/activate
+            export MODEL_PATH="~/crop-predictor-app/model"
+            echo "Starting FastAPI backend..."
+            nohup uvicorn app:app --host 0.0.0.0 --port 8000 > backend.log 2>&1 &
+            echo $! > backend.pid
+            echo "Backend PID: $(cat backend.pid)"
+            EOF
 
-          cat > stop_services.sh << 'STOP_EOF'
-          #!/bin/bash
-          cd /home/ubuntu/app
-          echo "Stopping services..."
-          if [ -f backend.pid ]; then
-              PID=$(cat backend.pid)
-              if kill -0 $PID 2>/dev/null; then
-                  kill $PID && echo "Backend stopped"
-              fi
-              rm -f backend.pid
-          fi
-          if [ -f frontend.pid ]; then
-              PID=$(cat frontend.pid)
-              if kill -0 $PID 2>/dev/null; then
-                  kill $PID && echo "Frontend stopped"
-              fi
-              rm -f frontend.pid
-          fi
-          pkill -f "uvicorn app:app" || true
-          pkill -f "streamlit run frontend.py" || true
-          echo "All services stopped"
-          STOP_EOF
+            # Frontend start script
+            cat > start_frontend.sh << 'EOF'
+            #!/bin/bash
+            cd ~/crop-predictor-app
+            source venv/bin/activate
+            export FASTAPI_URL="http://localhost:8000"
+            echo "Starting Streamlit frontend..."
+            nohup streamlit run frontend.py --server.port 8501 --server.address 0.0.0.0 --server.headless true > frontend.log 2>&1 &
+            echo $! > frontend.pid
+            echo "Frontend PID: $(cat frontend.pid)"
+            EOF
 
-          # Make scripts executable
-          chmod +x start_backend.sh start_frontend.sh stop_services.sh
+            # Stop script
+            cat > stop_all.sh << 'EOF'
+            #!/bin/bash
+            echo "Stopping all services..."
+            if [ -f ~/crop-predictor-app/backend.pid ]; then
+                kill $(cat ~/crop-predictor-app/backend.pid) 2>/dev/null || true
+                rm -f ~/crop-predictor-app/backend.pid
+            fi
+            if [ -f ~/crop-predictor-app/frontend.pid ]; then
+                kill $(cat ~/crop-predictor-app/frontend.pid) 2>/dev/null || true
+                rm -f ~/crop-predictor-app/frontend.pid
+            fi
+            pkill -f "uvicorn app:app" 2>/dev/null || true
+            pkill -f "streamlit run frontend.py" 2>/dev/null || true
+            echo "Services stopped"
+            EOF
 
-          # Start services
-          echo "Starting backend..."
-          ./start_backend.sh
-          sleep 8
+            chmod +x start_backend.sh start_frontend.sh stop_all.sh
+            echo "Scripts created and made executable"
 
-          # Verify backend started
-          if [ -f backend.pid ] && kill -0 $(cat backend.pid) 2>/dev/null; then
-              echo "✓ Backend started successfully"
-          else
-              echo "✗ Backend failed to start"
-              tail -10 backend.log 2>/dev/null || echo "No backend log found"
-              exit 1
-          fi
+      - name: Start backend service
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 60s
+          command_timeout: 30s
+          script: |
+            cd ~/crop-predictor-app
 
-          echo "Starting frontend..."
-          ./start_frontend.sh
-          sleep 10
+            echo "Starting backend service..."
+            ./start_backend.sh
 
-          # Verify frontend started
-          if [ -f frontend.pid ] && kill -0 $(cat frontend.pid) 2>/dev/null; then
-              echo "✓ Frontend started successfully"
-          else
-              echo "✗ Frontend failed to start"
-              tail -10 frontend.log 2>/dev/null || echo "No frontend log found"
-              # Don't exit here, backend might still work
-          fi
+            # Wait and verify
+            sleep 5
+            if [ -f backend.pid ] && kill -0 $(cat backend.pid) 2>/dev/null; then
+                echo "✓ Backend started successfully"
+                # Test if it's responding
+                for i in {1..5}; do
+                    if curl -f http://localhost:8000 >/dev/null 2>&1; then
+                        echo "✓ Backend is responding"
+                        break
+                    fi
+                    echo "Waiting for backend response ($i/5)..."
+                    sleep 2
+                done
+            else
+                echo "✗ Backend failed to start"
+                tail -10 backend.log 2>/dev/null || echo "No backend log"
+                exit 1
+            fi
 
-          # Setup nginx if not already configured
-          if [ ! -f /etc/nginx/sites-available/crop-predictor ]; then
-              echo "Setting up Nginx..."
-              sudo apt install -y nginx
-              
-              sudo tee /etc/nginx/sites-available/crop-predictor > /dev/null << 'NGINX_EOF'
-          server {
-              listen 80;
-              server_name _;
-              
-              client_max_body_size 100M;
-              
-              location / {
-                  proxy_pass http://localhost:8501;
-                  proxy_http_version 1.1;
-                  proxy_set_header Upgrade $http_upgrade;
-                  proxy_set_header Connection "upgrade";
-                  proxy_set_header Host $host;
-                  proxy_set_header X-Real-IP $remote_addr;
-                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto $scheme;
-                  proxy_read_timeout 86400;
-              }
-              
-              location /api/ {
-                  proxy_pass http://localhost:8000/;
-                  proxy_set_header Host $host;
-                  proxy_set_header X-Real-IP $remote_addr;
-                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto $scheme;
-              }
-              
-              location /health {
-                  access_log off;
-                  return 200 "healthy\n";
-                  add_header Content-Type text/plain;
-              }
-          }
-          NGINX_EOF
-              
-              sudo ln -sf /etc/nginx/sites-available/crop-predictor /etc/nginx/sites-enabled/
-              sudo rm -f /etc/nginx/sites-enabled/default
-              sudo nginx -t && sudo systemctl restart nginx
-              sudo systemctl enable nginx
-          else
-              echo "Nginx already configured, restarting..."
-              sudo systemctl restart nginx
-          fi
+      - name: Start frontend service
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 90s
+          command_timeout: 60s
+          script: |
+            cd ~/crop-predictor-app
 
-          # Final health check
-          echo "=== Deployment Health Check ==="
-          ps aux | grep -E "(uvicorn|streamlit)" | grep -v grep || echo "No processes found"
-          netstat -tlnp | grep -E "(8000|8501|:80)" || echo "No ports listening"
+            echo "Starting frontend service..."
+            ./start_frontend.sh
 
-          echo "=== Deployment Complete ==="
-          echo "✅ Deployment finished at $(date)"
-          echo "🌐 Application should be available at: http://$(curl -s ifconfig.me 2>/dev/null || echo 'YOUR_EC2_IP')"
-          echo "📊 Direct Frontend: http://$(curl -s ifconfig.me 2>/dev/null || echo 'YOUR_EC2_IP'):8501"
-          echo "🔧 Direct Backend: http://$(curl -s ifconfig.me 2>/dev/null || echo 'YOUR_EC2_IP'):8000"
-          EOF
+            # Wait longer for Streamlit to start
+            sleep 15
+            if [ -f frontend.pid ] && kill -0 $(cat frontend.pid) 2>/dev/null; then
+                echo "✓ Frontend process started"
+                # Test if it's responding (Streamlit takes longer)
+                for i in {1..10}; do
+                    if curl -f http://localhost:8501 >/dev/null 2>&1; then
+                        echo "✓ Frontend is responding"
+                        break
+                    fi
+                    echo "Waiting for frontend response ($i/10)..."
+                    sleep 3
+                done
+            else
+                echo "⚠ Frontend may have issues"
+                tail -10 frontend.log 2>/dev/null || echo "No frontend log"
+                # Don't fail here, backend might still work
+            fi
 
-          chmod +x deployment/deploy.sh
+      - name: Configure nginx reverse proxy
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 60s
+          script: |
+            echo "Configuring Nginx..."
 
-      - name: Setup SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+            # Create nginx config
+            sudo tee /etc/nginx/sites-available/crop-predictor > /dev/null << 'EOF'
+            server {
+                listen 80;
+                server_name _;
+                client_max_body_size 100M;
+                
+                # Streamlit frontend
+                location / {
+                    proxy_pass http://localhost:8501;
+                    proxy_http_version 1.1;
+                    proxy_set_header Upgrade $http_upgrade;
+                    proxy_set_header Connection "upgrade";
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $scheme;
+                    proxy_read_timeout 86400;
+                }
+                
+                # FastAPI backend
+                location /api/ {
+                    proxy_pass http://localhost:8000/;
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $scheme;
+                }
+                
+                location /health {
+                    access_log off;
+                    return 200 "healthy\n";
+                    add_header Content-Type text/plain;
+                }
+            }
+            EOF
 
-      - name: Create app directory on EC2
-        run: |
-          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'mkdir -p /home/ubuntu/app'
+            # Enable site
+            sudo ln -sf /etc/nginx/sites-available/crop-predictor /etc/nginx/sites-enabled/
+            sudo rm -f /etc/nginx/sites-enabled/default
 
-      - name: Deploy to EC2
-        run: |
-          echo "Copying files to EC2..."
-          scp -r deployment/* ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/home/ubuntu/app/
+            # Test and restart nginx
+            if sudo nginx -t; then
+                sudo systemctl restart nginx
+                sudo systemctl enable nginx
+                echo "✓ Nginx configured and restarted"
+            else
+                echo "✗ Nginx configuration error"
+                exit 1
+            fi
 
-          echo "Running deployment script..."
-          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'chmod +x /home/ubuntu/app/deploy.sh && bash /home/ubuntu/app/deploy.sh'
+      - name: Final deployment verification
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 60s
+          script: |
+            echo "=== FINAL DEPLOYMENT STATUS ==="
 
-      - name: Verify deployment
-        run: |
-          echo "Verifying deployment..."
-          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} '
-            cd /home/ubuntu/app
-            echo "=== Final Status Check ==="
+            # Check processes
+            echo "Running processes:"
             if pgrep -f "uvicorn app:app" > /dev/null; then
-                echo "✓ Backend is running"
+                echo "✓ Backend (uvicorn) is running"
             else
                 echo "✗ Backend not running"
             fi
-            
+
             if pgrep -f "streamlit run frontend.py" > /dev/null; then
-                echo "✓ Frontend is running"
+                echo "✓ Frontend (streamlit) is running"
             else
                 echo "✗ Frontend not running"
             fi
-            
+
+            # Check ports
+            echo "Listening ports:"
+            netstat -tlnp 2>/dev/null | grep -E "(8000|8501|:80)" || echo "No application ports found"
+
+            # Check nginx
             if sudo systemctl is-active --quiet nginx; then
-                echo "✓ Nginx is running"
+                echo "✓ Nginx is active"
             else
-                echo "✗ Nginx not running"
+                echo "✗ Nginx not active"
             fi
-            
-            echo "=== Application URLs ==="
+
+            # Get public IP for access URLs
             PUBLIC_IP=$(curl -s ifconfig.me 2>/dev/null || echo "YOUR_EC2_IP")
+
+            echo ""
+            echo "=== ACCESS INFORMATION ==="
             echo "🌐 Main Application: http://$PUBLIC_IP"
             echo "📊 Streamlit Direct: http://$PUBLIC_IP:8501"
             echo "🔧 FastAPI Direct: http://$PUBLIC_IP:8000"
-          '
+            echo "💾 Logs location: ~/crop-predictor-app/"
+            echo ""
+            echo "✅ Deployment completed successfully!"
+
+      - name: Create service management helper
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 30s
+          script: |
+            cat > ~/manage_crop_app.sh << 'EOF'
+            #!/bin/bash
+            APP_DIR="$HOME/crop-predictor-app"
+
+            case "$1" in
+                start)
+                    echo "Starting Crop Predictor services..."
+                    cd $APP_DIR
+                    ./start_backend.sh
+                    sleep 5
+                    ./start_frontend.sh
+                    echo "Services started. Check status with: $0 status"
+                    ;;
+                stop)
+                    echo "Stopping Crop Predictor services..."
+                    cd $APP_DIR
+                    ./stop_all.sh
+                    ;;
+                restart)
+                    echo "Restarting Crop Predictor services..."
+                    cd $APP_DIR
+                    ./stop_all.sh
+                    sleep 3
+                    ./start_backend.sh
+                    sleep 5
+                    ./start_frontend.sh
+                    ;;
+                status)
+                    echo "=== Crop Predictor Status ==="
+                    if pgrep -f "uvicorn app:app" > /dev/null; then
+                        echo "✓ Backend is running"
+                    else
+                        echo "✗ Backend not running"
+                    fi
+                    
+                    if pgrep -f "streamlit run frontend.py" > /dev/null; then
+                        echo "✓ Frontend is running"
+                    else
+                        echo "✗ Frontend not running"
+                    fi
+                    
+                    netstat -tlnp 2>/dev/null | grep -E "(8000|8501)" && echo "Ports are listening"
+                    ;;
+                logs)
+                    echo "=== Recent logs ==="
+                    echo "Backend log:"
+                    tail -20 $APP_DIR/backend.log 2>/dev/null || echo "No backend log"
+                    echo -e "\nFrontend log:"
+                    tail -20 $APP_DIR/frontend.log 2>/dev/null || echo "No frontend log"
+                    ;;
+                *)
+                    echo "Usage: $0 {start|stop|restart|status|logs}"
+                    exit 1
+                    ;;
+            esac
+            EOF
+
+            chmod +x ~/manage_crop_app.sh
+            echo "Created service management script at ~/manage_crop_app.sh"
+            echo "Usage: ~/manage_crop_app.sh {start|stop|restart|status|logs}"

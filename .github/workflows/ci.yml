@@ -1,4 +1,4 @@
-name: CI Pipeline - Crop Predictor
+name: CI Pipeline - Crop Predictor Docker
 
 on:
   push:

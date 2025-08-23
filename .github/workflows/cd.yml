@@ -4,36 +4,28 @@
 
 name: CD Pipeline - Deploy Crop Predictor
 
-# This workflow runs when another workflow ('CI Pipeline - Crop Predictor') has completed.
 on:
   workflow_run:
-    workflows: ["CI Pipeline - Crop Predictor"] # The name of the CI workflow
+    workflows: ["CI Pipeline - Crop Predictor"] # Must match CI workflow name
     types:
-      - completed # The event type that triggers this workflow
+      - completed
     branches:
-      - main # Only run for completions on the main branch
+      - main
 
 jobs:
-  # Job to deploy the application to the EC2 instance
   deploy:
-    runs-on: ubuntu-latest
-    # This condition ensures deployment only runs if the CI workflow was successful
     if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
 
-    # Grant permissions for the job to read artifacts from the triggering workflow
     permissions:
       actions: read
       contents: read
 
     steps:
-      # The download-artifact action, when used in a workflow_run context,
-      # will automatically download from the triggering workflow.
       - name: Download deployment artifact
         uses: actions/download-artifact@v4
         with:
           name: crop-predictor-artifact
-          # The 'run-id' parameter is not valid for this action and has been removed.
-          # The action automatically fetches the artifact from the triggering workflow run.
 
       - name: Deploy to EC2
         uses: appleboy/ssh-action@master
@@ -42,15 +34,20 @@ jobs:
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            # Create a directory for the app if it doesn't exist
+            echo "--- Creating app directory ---"
             mkdir -p ~/crop-predictor-app
-            # List the downloaded files for debugging purposes
-            echo "--- Downloaded Artifact Contents ---"
-            ls -R
-            echo "------------------------------------"
-            # Copy the contents of the artifact to the app directory on the server
-            scp -o StrictHostKeyChecking=no -r * ~/crop-predictor-app/
-            # Navigate into the app directory and execute the startup scripts
+
+            echo "--- Moving files to app directory ---"
+            mv * ~/crop-predictor-app/
+
+            echo "--- Changing directory ---"
             cd ~/crop-predictor-app
+
+            echo "--- Ensuring scripts are executable ---"
+            chmod +x start_backend.sh start_frontend.sh
+
+            echo "--- Starting backend ---"
             ./start_backend.sh
+
+            echo "--- Starting frontend ---"
             ./start_frontend.sh

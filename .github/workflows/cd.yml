@@ -15,7 +15,7 @@ jobs:
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: crop-predictor-artifact
+          name: crop-predictor-package
           path: ./artifact
 
       - name: List contents

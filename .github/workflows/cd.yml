@@ -1,53 +1,15 @@
-# This workflow defines the Continuous Deployment (CD) pipeline for the Crop Predictor application.
-# It is triggered ONLY upon the successful completion of the CI pipeline on the 'main' branch.
-# Its purpose is to deploy the packaged artifact to the AWS EC2 instance.
-
-name: CD Pipeline - Deploy Crop Predictor
-
-on:
-  workflow_run:
-    workflows: ["CI Pipeline - Crop Predictor"] # Must match CI workflow name
-    types:
-      - completed
-    branches:
-      - main
-
 jobs:
   deploy:
-    if: github.event.workflow_run.conclusion == 'success'
-    runs-on: ubuntu-latest
-
-    permissions:
-      actions: read
-      contents: read
-
+    runs-on: self-hosted
     steps:
-      - name: Download deployment artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: crop-predictor-artifact
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      - name: Deploy to EC2
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USERNAME }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            echo "--- Creating app directory ---"
-            mkdir -p ~/crop-predictor-app
-
-            echo "--- Moving files to app directory ---"
-            mv * ~/crop-predictor-app/
-
-            echo "--- Changing directory ---"
-            cd ~/crop-predictor-app
-
-            echo "--- Ensuring scripts are executable ---"
-            chmod +x start_backend.sh start_frontend.sh
-
-            echo "--- Starting backend ---"
-            ./start_backend.sh
-
-            echo "--- Starting frontend ---"
-            ./start_frontend.sh
+      - name: Deploy and start app
+        run: |
+          mkdir -p ~/crop-predictor-app
+          cp -r * ~/crop-predictor-app/
+          cd ~/crop-predictor-app
+          chmod +x start_backend.sh start_frontend.sh
+          ./start_backend.sh
+          ./start_frontend.sh

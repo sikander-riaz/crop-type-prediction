@@ -1,18 +1,24 @@
+# This workflow defines the Continuous Integration (CI) pipeline for the Crop Predictor application.
+# It automatically runs tests and packages the application into a deployable artifact.
+
 name: CI Pipeline - Crop Predictor
 
+# Controls when the workflow will run
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop] # Triggers on pushes to main and develop branches
   pull_request:
-    branches: [main]
+    branches: [main] # Triggers on pull requests targeting the main branch
 
 jobs:
+  # Job to run backend tests using pytest
   test-backend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v4
         with:
           python-version: "3.11"
@@ -29,12 +35,14 @@ jobs:
           python -c "from app import app; print('FastAPI app imports successfully')"
           pytest tests/ -v
 
+  # Job to run frontend tests
   test-frontend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v4
         with:
           python-version: "3.11"
@@ -45,45 +53,49 @@ jobs:
 
       - name: Test Streamlit app
         run: |
-          pip install -r requirements.txt
           python -c "import streamlit; print('Streamlit imports successfully')"
           python -c "exec(open('frontend.py').read().split('if __name__')[0]); print('Frontend script is valid')"
 
+  # Job to build and package the application into an artifact
   build-and-package:
     needs: [test-backend, test-frontend]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Create deployment package
         run: |
           mkdir -p deployment
-
-          cp *.py deployment/ || true
+          cp app.py deployment/ || true
+          cp frontend.py deployment/ || true
           cp requirements.txt deployment/ || true
           cp -r model/ deployment/ || true
           cp -r src/ deployment/ || true
           cp -r schema/ deployment/ || true
           cp -r public/ deployment/ || true
-          cp Dockerfile deployment/ || true
-          cp .dockerignore deployment/ || true
-          cp package*.json deployment/ || true
 
           cat > deployment/start_backend.sh << 'EOF'
           #!/bin/bash
+          echo "Starting backend server..."
           pip install -r requirements.txt
-          uvicorn app:app --host 0.0.0.0 --port 8000 --reload &
+          fuser -k 8000/tcp || true
+          nohup uvicorn app:app --host 0.0.0.0 --port 8000 > backend.log 2>&1 &
+          echo "Backend started."
           EOF
 
           cat > deployment/start_frontend.sh << 'EOF'
           #!/bin/bash
+          echo "Starting frontend server..."
           pip install -r requirements.txt
-          streamlit run frontend.py --server.port 8501 --server.address 0.0.0.0 &
+          fuser -k 8501/tcp || true
+          nohup streamlit run frontend.py --server.port 8501 --server.address 0.0.0.0 > frontend.log 2>&1 &
+          echo "Frontend started."
           EOF
 
           chmod +x deployment/start_*.sh
 
-      - name: Upload artifact
+      - name: Upload artifact for deployment
         uses: actions/upload-artifact@v4
         with:
           name: crop-predictor-artifact

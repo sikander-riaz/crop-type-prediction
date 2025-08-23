@@ -1,159 +1,49 @@
 name: CD Pipeline - Crop Predictor
+
 on:
   workflow_run:
-    workflows: ["CI Pipeline - Crop Predictor Docker"]
-    branches: [main]
-    types: [completed]
-  workflow_dispatch: # Keep manual trigger for testing
+    workflows: ["CI Pipeline - Crop Predictor"] # CI name
+    types:
+      - completed
 
 jobs:
   deploy:
-    runs-on: self-hosted
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # ✅ Download the artifact from CI
-      - name: Download deployment artifact from CI
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
           name: crop-predictor-artifact
-          path: ./deployment
-          run-id: ${{ github.event.workflow_run.id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ./artifact
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - name: List contents
+        run: ls -R ./artifact
+
+      - name: Zip artifact
+        run: |
+          zip -r crop-predictor-artifact.zip ./artifact
+
+      - name: Upload via SSH
+        uses: appleboy/scp-action@v0.1.5
         with:
-          python-version: "3.x" # Use whatever Python is available
+          host: ${{ secrets.HOST }}
+          username: ec2-user
+          key: ${{ secrets.KEY }}
+          source: "crop-predictor-artifact.zip"
+          target: "/home/ec2-user/"
 
-      # Stop existing services gracefully
-      - name: Stop existing services
-        run: |
-          echo "🛑 Stopping existing services..."
-
-          # Kill processes using the ports
-          fuser -k 8000/tcp || echo "Port 8000 not in use"
-          fuser -k 8501/tcp || echo "Port 8501 not in use"
-
-          # Kill by process name if needed
-          pkill -f "uvicorn app:app" || echo "No uvicorn process found"
-          pkill -f "streamlit run frontend.py" || echo "No streamlit process found"
-
-          sleep 5
-          echo "✅ Services stopped"
-
-      # ✅ Deploy and start application
-      - name: Deploy and start application
-        env:
-          # ✅ Environment variables (satisfies requirement)
-          DEPLOYMENT_ENV: production
-          DEPLOYED_AT: ${{ github.run_id }}
-          APP_TYPE: ml-model-service
-        run: |
-          cd deployment
-
-          echo "📦 Setting up deployment from artifact..."
-
-          # Install dependencies
-          echo "📥 Installing dependencies..."
-          pip3 install -r requirements.txt
-
-          # Make startup scripts executable (if they exist)
-          chmod +x start_*.sh || echo "No startup scripts found"
-
-          echo "🚀 Starting services..."
-
-          # Start backend service
-          echo "Starting FastAPI backend on port 8000..."
-          nohup python3 -m uvicorn app:app --host 0.0.0.0 --port 8000 > backend.log 2>&1 &
-          BACKEND_PID=$!
-          echo "Backend started with PID: $BACKEND_PID"
-          echo $BACKEND_PID > backend.pid
-
-          # Wait a moment for backend to initialize
-          sleep 10
-
-          # Start frontend service
-          echo "Starting Streamlit frontend on port 8501..."
-          nohup streamlit run frontend.py --server.port 8501 --server.address 0.0.0.0 --server.headless true > frontend.log 2>&1 &
-          FRONTEND_PID=$!
-          echo "Frontend started with PID: $FRONTEND_PID"
-          echo $FRONTEND_PID > frontend.pid
-
-          echo "✅ Both services started successfully"
-          echo "Backend PID: $BACKEND_PID"
-          echo "Frontend PID: $FRONTEND_PID"
-
-      # Health checks
-      - name: Health check and verification
-        run: |
-          cd deployment
-
-          echo "🏥 Running health checks..."
-
-          # Wait for services to fully start
-          echo "Waiting 30 seconds for services to initialize..."
-          sleep 30
-
-          # Check backend health
-          echo "Checking backend health..."
-          for i in {1..10}; do
-            if curl -f -s http://localhost:8000/ > /dev/null 2>&1; then
-              echo "✅ Backend is healthy and responding"
-              break
-            fi
-            echo "⏳ Backend attempt $i/10: Not ready yet, waiting 10 seconds..."
-            sleep 10
-            if [ $i -eq 10 ]; then
-              echo "❌ Backend health check failed after 10 attempts"
-              echo "Backend logs:"
-              tail -20 backend.log
-              exit 1
-            fi
-          done
-
-          # Check frontend health
-          echo "Checking frontend health..."
-          for i in {1..5}; do
-            if curl -s http://localhost:8501/ | grep -q "streamlit" -i; then
-              echo "✅ Frontend is healthy and responding"
-              break
-            fi
-            echo "⏳ Frontend attempt $i/5: Not ready yet, waiting 15 seconds..."
-            sleep 15
-            if [ $i -eq 5 ]; then
-              echo "⚠️ Frontend might still be starting up (this is often normal)"
-              echo "Frontend logs:"
-              tail -10 frontend.log
-            fi
-          done
-
-          echo ""
-          echo "🎉 DEPLOYMENT SUCCESSFUL!"
-          echo "📊 Backend API: http://your-ec2-ip:8000"
-          echo "🌐 Frontend App: http://your-ec2-ip:8501"
-          echo "📋 Deployment ID: ${{ github.run_id }}"
-
-      # Cleanup old deployments
-      - name: Cleanup old deployments
-        run: |
-          echo "🧹 Cleaning up old deployment files..."
-
-          # Keep only last 3 log files
-          find . -name "*.log" -type f -mtime +3 -delete 2>/dev/null || true
-
-          # Remove old pid files if processes are not running
-          for pidfile in *.pid; do
-            if [ -f "$pidfile" ]; then
-              pid=$(cat "$pidfile" 2>/dev/null || echo "")
-              if [ -n "$pid" ] && ! ps -p "$pid" > /dev/null 2>&1; then
-                rm -f "$pidfile"
-                echo "Removed stale PID file: $pidfile"
-              fi
-            fi
-          done
-
-          echo "✅ Cleanup completed"
+      - name: Deploy and Start Backend
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.HOST }}
+          username: ec2-user
+          key: ${{ secrets.KEY }}
+          script: |
+            mkdir -p ${{ secrets.APP_DIR }}
+            rm -rf ${{ secrets.APP_DIR }}/*
+            unzip /home/ec2-user/crop-predictor-artifact.zip -d ${{ secrets.APP_DIR }}
+            cd ${{ secrets.APP_DIR }}
+            pkill -f "uvicorn" || true
+            nohup uvicorn app:app --host 0.0.0.0 --port 8000 > log.txt 2>&1 &

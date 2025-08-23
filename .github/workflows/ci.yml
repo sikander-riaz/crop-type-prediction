@@ -87,7 +87,7 @@ jobs:
       - name: Log in to Docker Hub
         env:
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-          DOCKER_TOKEN: ${{ secrets.DOCKER_TOKEN }}
+          DOCKER_TOKEN: ${{ secrets.DOCKER_HUB_TOKEN }}
         run: echo $DOCKER_TOKEN | docker login -u $DOCKER_USERNAME --password-stdin
 
       - name: Set commit SHA tag

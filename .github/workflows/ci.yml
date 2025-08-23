@@ -7,9 +7,8 @@ on:
     branches: [main]
 
 jobs:
-  # ✅ Backend tests
   test-backend:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -26,7 +25,6 @@ jobs:
         run: |
           PYTHONPATH=${{ github.workspace }} pytest tests/ -v
 
-  # ✅ Frontend tests
   test-frontend:
     runs-on: ubuntu-latest
     steps:
@@ -44,7 +42,6 @@ jobs:
           python -c "import streamlit; print('Streamlit ok')"
           python -c "exec(open('frontend.py').read().split('if __name__')[0])"
 
-  # ✅ Build, package, and push Docker
   build-and-package:
     needs: [test-backend, test-frontend]
     runs-on: ubuntu-latest

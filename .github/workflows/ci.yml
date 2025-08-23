@@ -1,103 +1,93 @@
-# This workflow defines the Continuous Integration (CI) pipeline for the Crop Predictor application.
-# It automatically runs tests and packages the application into a deployable artifact.
-
 name: CI Pipeline - Crop Predictor
 
-# Controls when the workflow will run
 on:
   push:
-    branches: [main, develop] # Triggers on pushes to main and develop branches
+    branches: [main, develop]
   pull_request:
-    branches: [main] # Triggers on pull requests targeting the main branch
+    branches: [main]
 
 jobs:
-  # Job to run backend tests using pytest
+  # ✅ Backend tests
   test-backend:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
         with:
           python-version: "3.11"
-
-      - name: Install backend dependencies
-        run: |
+      - run: |
           pip install -r requirements.txt
           pip install pytest httpx
+      - run: pytest tests/ -v
 
-      - name: Test FastAPI backend
-        env:
-          PYTHONPATH: .
-        run: |
-          python -c "from app import app; print('FastAPI app imports successfully')"
-          pytest tests/ -v
-
-  # Job to run frontend tests
+  # ✅ Frontend tests
   test-frontend:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
         with:
           python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: |
+          python -c "import streamlit; print('Streamlit ok')"
+          python -c "exec(open('frontend.py').read().split('if __name__')[0])"
 
-      - name: Install frontend dependencies
-        run: |
-          pip install -r requirements.txt
-
-      - name: Test Streamlit app
-        run: |
-          python -c "import streamlit; print('Streamlit imports successfully')"
-          python -c "exec(open('frontend.py').read().split('if __name__')[0]); print('Frontend script is valid')"
-
-  # Job to build and package the application into an artifact
+  # ✅ Build, package, and push Docker
   build-and-package:
     needs: [test-backend, test-frontend]
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
+      # --- Package artifacts ---
       - name: Create deployment package
         run: |
           mkdir -p deployment
-          cp app.py deployment/ || true
-          cp frontend.py deployment/ || true
-          cp requirements.txt deployment/ || true
-          cp -r model/ deployment/ || true
-          cp -r src/ deployment/ || true
-          cp -r schema/ deployment/ || true
-          cp -r public/ deployment/ || true
+          cp app.py frontend.py requirements.txt deployment/ || true
+          cp -r model src schema public deployment/ || true
 
+          # (optional) startup scripts if you want
           cat > deployment/start_backend.sh << 'EOF'
           #!/bin/bash
-          echo "Starting backend server..."
+          echo "Starting backend..."
           pip install -r requirements.txt
           fuser -k 8000/tcp || true
           nohup uvicorn app:app --host 0.0.0.0 --port 8000 > backend.log 2>&1 &
-          echo "Backend started."
           EOF
 
           cat > deployment/start_frontend.sh << 'EOF'
           #!/bin/bash
-          echo "Starting frontend server..."
+          echo "Starting frontend..."
           pip install -r requirements.txt
           fuser -k 8501/tcp || true
           nohup streamlit run frontend.py --server.port 8501 --server.address 0.0.0.0 > frontend.log 2>&1 &
-          echo "Frontend started."
           EOF
 
           chmod +x deployment/start_*.sh
 
-      - name: Upload artifact for deployment
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: crop-predictor-artifact
           path: deployment/
           retention-days: 4
+
+      # --- Docker Build & Push ---
+      - name: Log in to Docker Hub
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_TOKEN: ${{ secrets.DOCKER_TOKEN }}
+        run: echo $DOCKER_TOKEN | docker login -u $DOCKER_USERNAME --password-stdin
+
+      - name: Set commit SHA tag
+        id: vars
+        run: echo "TAG=${GITHUB_SHA::7}" >> $GITHUB_ENV
+
+      - name: Build Docker image
+        run: |
+          docker build -t siku9786/cicd-pipeline:latest -t siku9786/cicd-pipeline:${TAG} .
+
+      - name: Push Docker image
+        run: |
+          docker push siku9786/cicd-pipeline:latest
+          docker push siku9786/cicd-pipeline:${TAG}
